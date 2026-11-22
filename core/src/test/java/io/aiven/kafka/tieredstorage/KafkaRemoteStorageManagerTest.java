@@ -234,6 +234,54 @@ public class KafkaRemoteStorageManagerTest extends BaseRemoteStorageManagerTest 
         assertThat(Files.list(remotePartitionPath)).hasSize(3);
     }
 
+    @Test
+    void outOfMemoryDuringUploadIsRetryable(
+        @TempDir final Path partitionDir
+    ) throws IOException, StorageBackendException, RemoteStorageException {
+        // given a sample local segment to be uploaded
+        final var segmentPath = Files.createFile(partitionDir.resolve("0000.log"));
+        final var segmentContent = "test";
+        Files.writeString(segmentPath, segmentContent);
+        final var logSegmentData = new LogSegmentData(
+            segmentPath,
+            Files.createFile(partitionDir.resolve("0000.index")),
+            Files.createFile(partitionDir.resolve("0000.timeindex")),
+            Optional.empty(),
+            Files.createFile(partitionDir.resolve("0000.snapshot")),
+            ByteBuffer.wrap("test".getBytes(StandardCharsets.UTF_8))
+        );
+
+        final var remoteLogSegmentMetadata = new RemoteLogSegmentMetadata(
+            REMOTE_SEGMENT_ID, 0, 1L,
+            0, 0, 0, segmentContent.length(), Map.of(0, 0L));
+
+        final var remotePartitionPath = targetDir.resolve(TOPIC_ID_PARTITION.topic() + "-" + TOPIC_ID)
+            .resolve(String.valueOf(TOPIC_ID_PARTITION.partition()));
+
+        final var config = new RemoteStorageManagerConfig(Map.of(
+            "chunk.size", "1",
+            "storage.backend.class", "io.aiven.kafka.tieredstorage.storage.filesystem.FileSystemStorage",
+            "storage.root", targetDir.toString()
+        ));
+        final KafkaRemoteStorageManager rsm = spy(new KafkaRemoteStorageManager(log, time, config));
+
+        // when the segment is uploaded but the indexes run out of memory
+        doThrow(OutOfMemoryError.class).when(rsm).uploadIndexes(any(), any(), any(), any(), any());
+
+        // then the error reaches Kafka as an exception, which its copy task retries
+        assertThatThrownBy(() -> rsm.copyLogSegmentData(remoteLogSegmentMetadata, logSegmentData, uploadMetricReporter))
+            .isInstanceOf(RemoteStorageException.class)
+            .hasCauseInstanceOf(OutOfMemoryError.class);
+
+        // and the uploaded segment is not left behind
+        assertThat(remotePartitionPath).doesNotExist();
+
+        // and the retry succeeds
+        doCallRealMethod().when(rsm).uploadIndexes(any(), any(), any(), any(), any());
+        rsm.copyLogSegmentData(remoteLogSegmentMetadata, logSegmentData, uploadMetricReporter);
+        assertThat(Files.list(remotePartitionPath)).hasSize(3);
+    }
+
     @ParameterizedTest
     @MethodSource("provideInterruptionExceptions")
     void fetchSegmentInterruptionWhenGettingManifest(final Class<Exception> outerExceptionClass,

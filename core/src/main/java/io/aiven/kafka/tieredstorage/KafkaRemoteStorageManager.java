@@ -216,6 +216,17 @@ class KafkaRemoteStorageManager extends InternalRemoteStorageManager {
                 log.warn("Removing orphan files failed", ex);
             }
             throw new RemoteStorageException(e);
+        } catch (final OutOfMemoryError oom) {
+            // Kafka's copy task retries after an Exception but ends for good after an Error,
+            // which leaves the partition's uploads stopped with no further log line.
+            log.error("Out of memory while copying log segment, the copy will be retried, metadata: {}",
+                remoteLogSegmentMetadata, oom);
+            try {
+                deleteSegmentObjects(remoteLogSegmentMetadata);
+            } catch (final Exception | OutOfMemoryError ex) {
+                log.warn("Removing orphan files failed", ex);
+            }
+            throw new RemoteStorageException("Out of memory while copying log segment, retryable", oom);
         }
 
         return buildCustomMetadata(customMetadataBuilder);
