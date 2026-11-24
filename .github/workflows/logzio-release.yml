@@ -1,0 +1,61 @@
+name: Logz.io release
+
+# Builds the core and storage-s3 distributions from a tag such as v1.2.0-logzio1 and publishes
+# them as a release of this fork, with their sha256. The Ansible role that installs the build
+# downloads the core jar from there. The tag must match `version` in gradle.properties.
+on:
+  push:
+    tags:
+      - "v*-logzio*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build the distributions and publish the release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Java SDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: 17
+          distribution: temurin
+
+      - name: Check the tag against gradle.properties
+        run: |
+          version=$(sed -n 's/^version=//p' gradle.properties)
+          echo "gradle.properties version: ${version}, tag: ${GITHUB_REF_NAME}"
+          test "v${version}" = "${GITHUB_REF_NAME}"
+
+      - name: Test and build
+        run: ./gradlew --no-daemon :core:test :core:jar :core:distTar :storage:s3:distTar
+
+      - name: Collect the assets
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir assets
+          cp "core/build/libs/core-${version}.jar" assets/
+          cp "core/build/distributions/core-${version}.tgz" assets/
+          cp storage/s3/build/distributions/*-"${version}".tgz assets/
+          cd assets
+          ls -l
+          sha256sum * | tee SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" assets/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Built from ${GITHUB_SHA}: upstream 1.2.0 with b962e46, which catches OutOfMemoryError on the copy path so that Kafka retries the copy (Aiven issue 820)."
